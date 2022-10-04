@@ -1,0 +1,78 @@
+name: Reusable workflow create ACA infrastructure
+
+on:
+  workflow_call:
+    inputs:
+      rg-name:
+        required: true
+        type: string
+      location:
+        required: true
+        type: string
+      law-name:
+        required: true
+        type: string
+      aca-env-name:
+        required: true
+        type: string
+      reg-name:
+        required: true
+        type: string
+      reg-sku:
+        required: true
+        type: string
+    secrets:
+      azure-creds:
+        required: true
+
+jobs:
+  build-infra:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Azure Login
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.azure-creds }}
+
+      - name: Create Resource Group
+        uses: azure/CLI@v1
+        with:
+          inlineScript: |
+            az group create -l ${{ inputs.location }} -n ${{ inputs.rg-name}}
+            
+      - name: Create Log Analytics Workspace
+        uses: azure/CLI@v1
+        with:
+          inlineScript: |
+            az monitor log-analytics workspace create --resource-group ${{ inputs.rg-name }} --workspace-name ${{ inputs.law-name }}
+            # Get the Client_ID and CLIENT_SECRET, run each separately and wait for it to complete
+            LOG_ANALYTICS_WORKSPACE_CLIENT_ID=$(az monitor log-analytics workspace show --query customerId -g ${{ inputs.rg-name }} -n ${{ inputs.law-name }} --out tsv)
+            LOG_ANALYTICS_WORKSPACE_CLIENT_SECRET=$(az monitor log-analytics workspace get-shared-keys --query primarySharedKey -g ${{ inputs.rg-name }} -n ${{ inputs.law-name }} --out tsv)
+            echo "::add-mask::$LOG_ANALYTICS_WORKSPACE_CLIENT_ID"
+            echo "::add-mask::$LOG_ANALYTICS_WORKSPACE_CLIENT_SECRET"
+            echo LOG_ANALYTICS_WORKSPACE_CLIENT_ID=$LOG_ANALYTICS_WORKSPACE_CLIENT_ID >> $GITHUB_ENV
+            echo LOG_ANALYTICS_WORKSPACE_CLIENT_SECRET=$LOG_ANALYTICS_WORKSPACE_CLIENT_SECRET >> $GITHUB_ENV
+            
+      - name: Create Container Registry
+        uses: azure/CLI@v1
+        with:
+          inlineScript: |
+            az acr create -n ${{ inputs.reg-name }} -g ${{ inputs.rg-name }} --sku ${{ inputs.reg-sku }} --admin-enabled true
+            ACR_USERNAME=$(az acr credential show -n ${{ inputs.reg-name }} --query username --out tsv)
+            ACR_PASSWORD=$(az acr credential show -n ${{ inputs.reg-name }} --query passwords[0].value --out tsv)
+            echo "::add-mask::$ACR_PASSWORD"
+            echo ACR_USERNAME=$ACR_USERNAME >> $GITHUB_ENV
+            echo ACR_PASSWORD=$ACR_PASSWORD >> $GITHUB_ENV
+
+      - name: Create Container App Environment
+        uses: azure/CLI@v1
+        with:
+          inlineScript: |
+            #Allow az cli to get extensions without prompts and containerapp needs an extension
+            az config set extension.use_dynamic_install=yes_without_prompt
+            az containerapp env create --name ${{ inputs.aca-env-name }} \
+              --resource-group ${{ inputs.rg-name }} \
+              --location ${{ inputs.location }} \
+              --logs-workspace-id $LOG_ANALYTICS_WORKSPACE_CLIENT_ID \
+              --logs-workspace-key $LOG_ANALYTICS_WORKSPACE_CLIENT_SECRET
